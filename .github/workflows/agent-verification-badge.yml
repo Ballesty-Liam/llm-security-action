@@ -1,0 +1,94 @@
+name: Agent Verification
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  schedule:
+    - cron: '0 2 * * 0'  # Weekly verification (offset from security scan)
+  workflow_dispatch:  # Allow manual runs
+
+jobs:
+  agent-verification:
+    name: Agent Verification
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: write  # For cache access
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Restore agent registry cache
+      - name: Restore Agent Registry Cache
+        uses: actions/cache/restore@v3
+        with:
+          path: .agent-cache
+          key: agent-registry-${{ github.repository }}-${{ github.run_id }}
+          restore-keys: |
+            agent-registry-${{ github.repository }}-
+            agent-registry-
+
+      - name: Run Agent Verification
+        uses: Ballesty-Liam/llm-security-action@v1
+        id: verify
+        with:
+          config: llm-policy.yml
+
+      # Save agent registry cache
+      - name: Save Agent Registry Cache
+        uses: actions/cache/save@v3
+        if: always()
+        with:
+          path: .agent-cache
+          key: agent-registry-${{ github.repository }}-${{ github.run_id }}
+
+      # Optional: Post comment on PR with agent verification results
+      - name: Comment PR with Agent Status
+        if: github.event_name == 'pull_request' && steps.verify.outputs.agent-status != 'unknown'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const agentStatus = '${{ steps.verify.outputs.agent-status }}';
+            const trustScore = '${{ steps.verify.outputs.agent-trust-score }}';
+            const agentId = '${{ steps.verify.outputs.agent-id }}';
+            const verificationUrl = '${{ steps.verify.outputs.agent-verification-url }}';
+            
+            let statusEmoji = '❓';
+            let statusText = 'Unknown';
+            
+            switch(agentStatus) {
+              case 'verified': statusEmoji = '✅'; statusText = 'Verified'; break;
+              case 'trusted': statusEmoji = '🔷'; statusText = 'Trusted'; break;
+              case 'validated': statusEmoji = '🟡'; statusText = 'Validated'; break;
+              case 'basic': statusEmoji = '🟠'; statusText = 'Basic'; break;
+              case 'unverified': statusEmoji = '⚪'; statusText = 'Unverified'; break;
+              case 'error': statusEmoji = '❌'; statusText = 'Error'; break;
+            }
+            
+            const output = `### 🤖 Agent Verification Results
+
+            **Status:** ${statusEmoji} ${statusText}
+            **Trust Score:** ${trustScore} / 1.0
+            **Agent ID:** \`${agentId}\`
+
+            ${verificationUrl ? `[View Verification Details](${verificationUrl})` : ''}
+
+            This agent's behavioral fingerprint has been analyzed and verified across repositories to establish trust and consistency.
+
+            **What this means:**
+            - ${trustScore >= 0.9 ? '🟢 High trust - consistent patterns across repositories' : ''}
+            - ${trustScore >= 0.75 && trustScore < 0.9 ? '🔵 Good trust - reliable behavioral patterns' : ''}
+            - ${trustScore >= 0.6 && trustScore < 0.75 ? '🟡 Moderate trust - basic verification passed' : ''}
+            - ${trustScore < 0.6 ? '🟠 Low trust - limited verification history' : ''}`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            })

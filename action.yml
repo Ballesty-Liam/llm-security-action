@@ -23,6 +23,18 @@ outputs:
   badge-status:
     description: "Status text for badges: ✅ Secured, ⚠️ Warnings, or ❌ Failed"
 
+  # V1 Agent Verification Outputs
+  agent-status:
+    description: "Agent verification status: verified, trusted, validated, basic, unverified, or error"
+  agent-trust-score:
+    description: "Agent trust score (0.0 to 1.0)"
+  agent-id:
+    description: "Unique agent identifier (DID format)"
+  agent-badge-status:
+    description: "Agent badge status with emoji and trust level"
+  agent-verification-url:
+    description: "URL for agent verification details"
+
 runs:
   using: "docker"
   image: "Dockerfile"

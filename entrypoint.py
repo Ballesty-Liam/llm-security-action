@@ -1,8 +1,9 @@
-import os, sys, yaml, json, pathlib
+import os, sys, yaml, json, pathlib, asyncio
 from llm_policy.api_key_scanner import scan_api_keys
 from llm_policy.rate_limit_scanner import scan_rate_limits
 from llm_policy.telemetry import emit_metrics
 from llm_policy.input_sanitize_scanner import scan_input_sanitization
+from agent_verification_engine.verifier import AgentVerifier
 
 ROOT = pathlib.Path(".")
 CONFIG_FILE = os.getenv("INPUT_CONFIG", "llm-policy.yml")
@@ -15,101 +16,280 @@ def load_cfg():
     return {}
 
 
-def set_github_outputs(results, failed):
-    """Set GitHub Action outputs for use in workflows"""
+def set_github_outputs(v0_results, agent_results, v0_failed):
+    """Set GitHub Action outputs for both V0 security and Agent Verification"""
     output_file = os.getenv('GITHUB_OUTPUT')
     if not output_file:
         return
 
-    # Calculate overall status
-    api_violations = results.get("api_key_security", {}).get("violations", 0)
-    rate_warnings = results.get("rate_limit", {}).get("total", 0)
-    sanitize_warnings = results.get("input_sanitize", {}).get("total", 0)
+    # V0 Security outputs (existing)
+    api_violations = v0_results.get("api_key_security", {}).get("violations", 0)
+    rate_warnings = v0_results.get("rate_limit", {}).get("total", 0)
+    sanitize_warnings = v0_results.get("input_sanitize", {}).get("total", 0)
 
-    if failed:
-        status = "failed"
-        badge_status = "❌ Failed"
+    if v0_failed:
+        security_status = "failed"
+        security_badge_status = "❌ Failed"
     elif api_violations > 0 or rate_warnings > 0 or sanitize_warnings > 0:
-        status = "warning"
-        badge_status = "⚠️ Warnings"
+        security_status = "warning"
+        security_badge_status = "⚠️ Warnings"
     else:
-        status = "passed"
-        badge_status = "✅ Secured"
+        security_status = "passed"
+        security_badge_status = "✅ Secured"
 
-    # Write outputs
+    # Agent Verification outputs (new)
+    agent_status = "unknown"
+    agent_badge_status = "❓ Unknown"
+    trust_score = 0
+    agent_id = "unknown"
+    verification_url = ""
+
+    if agent_results and agent_results.get("success"):
+        agent_data = agent_results.get("agent", {})
+        trust_score = agent_data.get("trustScore", 0)
+        agent_id = agent_data.get("id", "unknown")
+        verification_url = agent_results.get("badge", {}).get("verificationUrl", "")
+
+        # Determine agent status based on trust score
+        if trust_score >= 0.9:
+            agent_status = "verified"
+            agent_badge_status = "✅ Verified"
+        elif trust_score >= 0.75:
+            agent_status = "trusted"
+            agent_badge_status = "🔷 Trusted"
+        elif trust_score >= 0.6:
+            agent_status = "validated"
+            agent_badge_status = "🟡 Validated"
+        elif trust_score >= 0.4:
+            agent_status = "basic"
+            agent_badge_status = "🟠 Basic"
+        else:
+            agent_status = "unverified"
+            agent_badge_status = "⚪ Unverified"
+    elif agent_results and not agent_results.get("success"):
+        agent_status = "error"
+        agent_badge_status = "❌ Error"
+
+    # Write all outputs
     with open(output_file, 'a') as f:
-        f.write(f"status={status}\n")
+        # V0 Security outputs
+        f.write(f"security-status={security_status}\n")
         f.write(f"api-key-violations={api_violations}\n")
         f.write(f"rate-limit-warnings={rate_warnings}\n")
         f.write(f"input-sanitize-warnings={sanitize_warnings}\n")
-        f.write(f"badge-status={badge_status}\n")
+        f.write(f"security-badge-status={security_badge_status}\n")
 
-    # Also set for GitHub Actions annotations
-    print(f"::notice title=LLM Security Status::{badge_status}")
+        # Agent Verification outputs
+        f.write(f"agent-status={agent_status}\n")
+        f.write(f"agent-trust-score={trust_score:.2f}\n")
+        f.write(f"agent-id={agent_id}\n")
+        f.write(f"agent-badge-status={agent_badge_status}\n")
+        f.write(f"agent-verification-url={verification_url}\n")
+
+    # GitHub Actions annotations
+    print(f"::notice title=LLM Security Status::{security_badge_status}")
+    print(f"::notice title=Agent Verification::{agent_badge_status} (Trust: {trust_score:.2f})")
 
 
-cfg = load_cfg()
-policies = cfg.get("policies", {"api-key-security": True, "rate-limit": True})
-failed = False
-results = {}
+def collect_file_contents():
+    """Collect file contents for Agent Verification Engine"""
+    files = []
+    exclude_patterns = [".git", "__pycache__", "node_modules", ".github"]
 
-# API Key Security Scanner
-if policies.get("api-key-security"):
-    res = scan_api_keys(ROOT, cfg)
-    results["api_key_security"] = res
-    # API keys are now warnings, not failures
-    # failed |= res["violations"] > 0  # REMOVED THIS LINE
+    for path in ROOT.rglob("*"):
+        if not path.is_file():
+            continue
+        if any(pattern in str(path) for pattern in exclude_patterns):
+            continue
+        if path.suffix not in [".py", ".js", ".ts", ".go", ".md", ".yml", ".yaml"]:
+            continue
 
-    # Output warnings instead of errors for violations
-    if res["violations"] > 0:
-        print(f"::warning title=API Key Violations::Found {res['violations']} potential API keys or tokens")
-        for detail in res.get("details", [])[:5]:  # Show first 5
-            print(f"::warning file={detail.split(':')[0]}::{detail}")
+        try:
+            content = path.read_text("utf-8", "ignore")
+            files.append({
+                "path": str(path),
+                "content": content
+            })
+        except Exception:
+            continue
 
-# Input Sanitization Scanner
-if policies.get("input-sanitize", True):
-    res = scan_input_sanitization(ROOT, cfg)
-    results["input_sanitize"] = res
-    # warn-only → no change to `failed`
+    return files
 
-    # Output warnings as annotations
-    if res.get("total", 0) > 0:
-        print(f"::warning title=Input Sanitization::Found {res['total']} potential unsanitized inputs")
-        for warning in res.get("warnings", [])[:5]:  # Show first 5
-            if ":" in warning:
-                parts = warning.split(":", 2)
-                print(
-                    f"::warning file={parts[0]},line={parts[1]}::{parts[2] if len(parts) > 2 else 'Unsanitized input'}")
 
-# Rate Limit Scanner
-if policies.get("rate-limit"):
-    res = scan_rate_limits(ROOT, cfg)
-    results["rate_limit"] = res
-    # warn only; not changing `failed`
+def get_github_context():
+    """Extract GitHub repository context from environment"""
+    return {
+        "stargazers_count": 0,  # Would need GitHub API to get real values
+        "forks_count": 0,
+        "watchers_count": 0,
+        "updated_at": os.getenv("GITHUB_SHA_TIMESTAMP", ""),
+        "size": 0,
+        "language": "Python",  # Could be detected from files
+        "private": os.getenv("GITHUB_REPOSITORY", "").startswith("private/"),
+        "repository": os.getenv("GITHUB_REPOSITORY", ""),
+        "sha": os.getenv("GITHUB_SHA", ""),
+        "ref": os.getenv("GITHUB_REF", ""),
+        "workflow": os.getenv("GITHUB_WORKFLOW", ""),
+        "run_id": os.getenv("GITHUB_RUN_ID", ""),
+        "run_number": os.getenv("GITHUB_RUN_NUMBER", "")
+    }
 
-    # Output warnings as annotations
-    if res.get("total", 0) > 0:
-        print(f"::warning title=Rate Limiting::Found {res['total']} LLM calls without rate limiting")
-        for warning in res.get("warnings", [])[:5]:  # Show first 5
-            if ":" in warning:
-                parts = warning.split(":", 2)
-                print(
-                    f"::warning file={parts[0]},line={parts[1]}::{parts[2] if len(parts) > 2 else 'Missing rate limit'}")
 
-# Pretty print results
-print("\n" + "=" * 50)
-print("LLM POLICY SCAN RESULTS")
-print("=" * 50)
-print(json.dumps(results, indent=2))
-print("=" * 50 + "\n")
+async def run_agent_verification(v0_results):
+    """Run Agent Verification Engine with real data"""
+    try:
+        print("\n" + "=" * 50)
+        print("AGENT VERIFICATION ENGINE - V1")
+        print("=" * 50)
 
-# Emit telemetry
-emit_metrics(results, cfg)
+        # Prepare scan results in expected format
+        scan_results = {
+            "passed": v0_results.get("api_key_security", {}).get("violations", 0) == 0,
+            "issuesFound": (
+                    v0_results.get("api_key_security", {}).get("violations", 0) +
+                    v0_results.get("rate_limit", {}).get("total", 0) +
+                    v0_results.get("input_sanitize", {}).get("total", 0)
+            ),
+            "securityScore": max(0.1, 1.0 - (
+                    v0_results.get("api_key_security", {}).get("violations", 0) * 0.3 +
+                    v0_results.get("rate_limit", {}).get("total", 0) * 0.1 +
+                    v0_results.get("input_sanitize", {}).get("total", 0) * 0.1
+            )),
+            "hasSecurityUpdates": v0_results.get("api_key_security", {}).get("violations", 0) == 0,
+            "files": collect_file_contents()
+        }
 
-# Set GitHub Action outputs
-set_github_outputs(results, failed)
+        github_context = get_github_context()
+        repo_url = f"https://github.com/{github_context['repository']}"
 
-# Final status
-if failed:
-    sys.exit("❌ Policy enforcement failed")
-print("✅ All checks completed")
+        # Initialize verifier with cache path
+        cache_path = os.getenv("GITHUB_WORKSPACE", ".") + "/.agent-cache/registry.json"
+        verifier = AgentVerifier({
+            "registry_path": cache_path,
+            "badge_base_url": "https://agentproof.dev",  # Placeholder
+            "enable_cache": True
+        })
+
+        result = await verifier.verify_agent(repo_url, scan_results, github_context)
+
+        if result["success"]:
+            agent = result["agent"]
+            print(f"✅ Agent Verified: {agent['id']}")
+            print(f"🔒 Trust Score: {agent['trustScore']:.2f}")
+            print(f"🏷️ Badge URL: {result['badge']['verificationUrl']}")
+            print(f"📊 Repositories: {len(agent['repositories'])}")
+            print(f"🔄 Verification Count: {agent['metadata']['verificationCount']}")
+        else:
+            print("❌ Agent verification failed")
+            print(f"Error: {result['error']['message']}")
+
+        return result
+
+    except Exception as e:
+        print(f"❌ Agent verification error: {e}")
+        return {
+            "success": False,
+            "error": {"message": str(e)},
+            "agent": None,
+            "verification": None,
+            "badge": None
+        }
+
+
+def main():
+    print("LLM AGENT TRUST VERIFICATION - V1")
+    print("Running V0 Security Scan + Agent Verification Engine")
+    print("=" * 60)
+
+    cfg = load_cfg()
+    policies = cfg.get("policies", {"api-key-security": True, "rate-limit": True})
+    v0_failed = False
+    v0_results = {}
+
+    # ===============================
+    # V0 SECURITY SCAN (EXISTING)
+    # ===============================
+    print("\n📋 PHASE 1: V0 SECURITY ANALYSIS")
+    print("-" * 30)
+
+    # API Key Security Scanner
+    if policies.get("api-key-security"):
+        res = scan_api_keys(ROOT, cfg)
+        v0_results["api_key_security"] = res
+
+        if res["violations"] > 0:
+            print(f"::warning title=API Key Violations::Found {res['violations']} potential API keys or tokens")
+            for detail in res.get("details", [])[:5]:
+                print(f"::warning file={detail.split(':')[0]}::{detail}")
+
+    # Input Sanitization Scanner
+    if policies.get("input-sanitize", True):
+        res = scan_input_sanitization(ROOT, cfg)
+        v0_results["input_sanitize"] = res
+
+        if res.get("total", 0) > 0:
+            print(f"::warning title=Input Sanitization::Found {res['total']} potential unsanitized inputs")
+            for warning in res.get("warnings", [])[:5]:
+                if ":" in warning:
+                    parts = warning.split(":", 2)
+                    print(
+                        f"::warning file={parts[0]},line={parts[1]}::{parts[2] if len(parts) > 2 else 'Unsanitized input'}")
+
+    # Rate Limit Scanner
+    if policies.get("rate-limit"):
+        res = scan_rate_limits(ROOT, cfg)
+        v0_results["rate_limit"] = res
+
+        if res.get("total", 0) > 0:
+            print(f"::warning title=Rate Limiting::Found {res['total']} LLM calls without rate limiting")
+            for warning in res.get("warnings", [])[:5]:
+                if ":" in warning:
+                    parts = warning.split(":", 2)
+                    print(
+                        f"::warning file={parts[0]},line={parts[1]}::{parts[2] if len(parts) > 2 else 'Missing rate limit'}")
+
+    # V0 Results Summary
+    print("\n📊 V0 SECURITY SCAN RESULTS:")
+    print(json.dumps(v0_results, indent=2))
+
+    # ===============================
+    # AGENT VERIFICATION (NEW)
+    # ===============================
+    print("\n🤖 PHASE 2: AGENT VERIFICATION ENGINE")
+    print("-" * 30)
+
+    # Run agent verification
+    agent_results = asyncio.run(run_agent_verification(v0_results))
+
+    # ===============================
+    # FINALIZATION
+    # ===============================
+    # Emit telemetry
+    emit_metrics(v0_results, cfg)
+
+    # Set GitHub Action outputs for both systems
+    set_github_outputs(v0_results, agent_results, v0_failed)
+
+    # Final status
+    print("\n" + "=" * 60)
+    print("✅ V1 VERIFICATION COMPLETE")
+
+    if v0_failed:
+        print("❌ V0 Security scan failed")
+
+    if agent_results and agent_results.get("success"):
+        trust_score = agent_results["agent"]["trustScore"]
+        print(f"🤖 Agent Trust Score: {trust_score:.2f}")
+    else:
+        print("⚠️ Agent verification had issues")
+
+    print("=" * 60)
+
+    if v0_failed:
+        sys.exit("❌ V0 Policy enforcement failed")
+
+    print("✅ All verification steps completed")
+
+
+if __name__ == "__main__":
+    main()
