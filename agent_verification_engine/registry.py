@@ -101,10 +101,10 @@ class AgentRegistry:
         try:
             repo_hash = hashlib.sha256(repo_url.encode()).hexdigest()[:12]
             fingerprint_hash = fingerprint["composite"][:12]
-            return f"did:agentproof:{repo_hash}-{fingerprint_hash}"
+            return f"agentproof:{repo_hash}-{fingerprint_hash}"  # Remove "did:" prefix FOR NOW
         except Exception:
             random_id = os.urandom(8).hex()
-            return f"did:agentproof:fallback-{random_id}"
+            return f"agentproof:fallback-{random_id}"  # Remove "did:" prefix FOR NOW
 
     def calculate_initial_trust_score(self, fingerprint, metadata):
         score = 0.5

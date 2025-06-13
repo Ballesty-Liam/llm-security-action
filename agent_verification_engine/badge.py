@@ -106,7 +106,8 @@ class AgentBadgeGenerator:
         return f"{self.options['base_url']}/verify/{data['hash']}"
 
     def generate_markdown(self, data):
-        return f"[![Agent Verification]({self.options['base_url']}/badge/{data['hash']}.svg)]({data['verificationUrl']})"
+        verification_url = self.generate_verification_url(data)
+        return f"[![Agent Verification]({self.options['base_url']}/badge/{data['hash']}.svg)]({verification_url})"
 
     def generate_html(self, data):
         return f'<a href="{data["verificationUrl"]}"><img src="{self.options["base_url"]}/badge/{data["hash"]}.svg" alt="Agent Verification: {data["trustLevel"]}"></a>'
