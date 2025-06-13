@@ -3,9 +3,9 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from fingerprinter import AgentFingerprinter
-from badge import AgentBadgeGenerator
-from github_actions_cache import CachedAgentRegistry
+from .fingerprinter import AgentFingerprinter
+from .badge import AgentBadgeGenerator
+from .github_actions_cache import CachedAgentRegistry
 
 
 class AgentVerifier:
