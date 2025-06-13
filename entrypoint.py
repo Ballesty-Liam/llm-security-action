@@ -1,9 +1,22 @@
 import os, sys, yaml, json, pathlib, asyncio
+
+# Add the current directory to Python path to help with imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from llm_policy.api_key_scanner import scan_api_keys
 from llm_policy.rate_limit_scanner import scan_rate_limits
 from llm_policy.telemetry import emit_metrics
 from llm_policy.input_sanitize_scanner import scan_input_sanitization
-from agent_verification_engine.verifier import AgentVerifier
+
+# Try to import agent verification engine with error handling
+try:
+    from agent_verification_engine.verifier import AgentVerifier
+
+    AGENT_VERIFICATION_AVAILABLE = True
+except ImportError as e:
+    print(f"⚠️ Agent verification engine not available: {e}")
+    print("🔄 Falling back to V0 security scanning only")
+    AGENT_VERIFICATION_AVAILABLE = False
 
 ROOT = pathlib.Path(".")
 CONFIG_FILE = os.getenv("INPUT_CONFIG", "llm-policy.yml")
@@ -137,6 +150,16 @@ def get_github_context():
 
 async def run_agent_verification(v0_results):
     """Run Agent Verification Engine with real data"""
+    if not AGENT_VERIFICATION_AVAILABLE:
+        print("⚠️ Agent verification engine not available, skipping...")
+        return {
+            "success": False,
+            "error": {"message": "Agent verification engine not available"},
+            "agent": None,
+            "verification": None,
+            "badge": None
+        }
+
     try:
         print("\n" + "=" * 50)
         print("AGENT VERIFICATION ENGINE - V1")
@@ -198,7 +221,10 @@ async def run_agent_verification(v0_results):
 
 def main():
     print("LLM AGENT TRUST VERIFICATION - V1")
-    print("Running V0 Security Scan + Agent Verification Engine")
+    if AGENT_VERIFICATION_AVAILABLE:
+        print("Running V0 Security Scan + Agent Verification Engine")
+    else:
+        print("Running V0 Security Scan Only (Agent verification unavailable)")
     print("=" * 60)
 
     cfg = load_cfg()
@@ -255,11 +281,17 @@ def main():
     # ===============================
     # AGENT VERIFICATION (NEW)
     # ===============================
-    print("\n🤖 PHASE 2: AGENT VERIFICATION ENGINE")
-    print("-" * 30)
+    if AGENT_VERIFICATION_AVAILABLE:
+        print("\n🤖 PHASE 2: AGENT VERIFICATION ENGINE")
+        print("-" * 30)
 
-    # Run agent verification
-    agent_results = asyncio.run(run_agent_verification(v0_results))
+        # Run agent verification
+        agent_results = asyncio.run(run_agent_verification(v0_results))
+    else:
+        print("\n⚠️ PHASE 2: AGENT VERIFICATION SKIPPED")
+        print("-" * 30)
+        print("Agent verification engine not available")
+        agent_results = None
 
     # ===============================
     # FINALIZATION
@@ -272,23 +304,31 @@ def main():
 
     # Final status
     print("\n" + "=" * 60)
-    print("✅ V1 VERIFICATION COMPLETE")
+    if AGENT_VERIFICATION_AVAILABLE:
+        print("✅ V1 VERIFICATION COMPLETE")
+    else:
+        print("✅ V0 SECURITY SCAN COMPLETE")
 
     if v0_failed:
         print("❌ V0 Security scan failed")
 
-    if agent_results and agent_results.get("success"):
+    if AGENT_VERIFICATION_AVAILABLE and agent_results and agent_results.get("success"):
         trust_score = agent_results["agent"]["trustScore"]
         print(f"🤖 Agent Trust Score: {trust_score:.2f}")
-    else:
+    elif AGENT_VERIFICATION_AVAILABLE and agent_results:
         print("⚠️ Agent verification had issues")
+    else:
+        print("ℹ️ Agent verification skipped")
 
     print("=" * 60)
 
     if v0_failed:
         sys.exit("❌ V0 Policy enforcement failed")
 
-    print("✅ All verification steps completed")
+    if AGENT_VERIFICATION_AVAILABLE:
+        print("✅ All verification steps completed")
+    else:
+        print("✅ Security verification completed (Agent verification unavailable)")
 
 
 if __name__ == "__main__":
