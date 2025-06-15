@@ -16,10 +16,14 @@ class AgentBadgeGenerator:
     def generate_badge(self):
         try:
             badge_data = self.prepare_badge_data()
+            verification_url = self.generate_verification_url(badge_data)
+            # Add verification URL to badge_data
+            badge_data['verificationUrl'] = verification_url
+
             return {
                 "svg": self.create_badge_svg(badge_data),
                 "metadata": badge_data,
-                "verificationUrl": self.generate_verification_url(badge_data),
+                "verificationUrl": verification_url,
                 "markdown": self.generate_markdown(badge_data),
                 "html": self.generate_html(badge_data)
             }
@@ -106,8 +110,7 @@ class AgentBadgeGenerator:
         return f"{self.options['base_url']}/verify/{data['hash']}"
 
     def generate_markdown(self, data):
-        verification_url = self.generate_verification_url(data)
-        return f"[![Agent Verification]({self.options['base_url']}/badge/{data['hash']}.svg)]({verification_url})"
+        return f"[![Agent Verification]({self.options['base_url']}/badge/{data['hash']}.svg)]({data['verificationUrl']})"
 
     def generate_html(self, data):
         return f'<a href="{data["verificationUrl"]}"><img src="{self.options["base_url"]}/badge/{data["hash"]}.svg" alt="Agent Verification: {data["trustLevel"]}"></a>'
